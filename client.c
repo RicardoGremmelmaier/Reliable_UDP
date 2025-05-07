@@ -18,28 +18,34 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sys/select.h>
 
 #define BUFFER_SIZE 1024
-#define HEADER_SIZE (sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint16_t))
+#define HEADER_SIZE (sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint32_t))
 #define DATA_SIZE (BUFFER_SIZE - HEADER_SIZE)
 
 typedef struct {
     uint32_t seq_num;     
     uint16_t size;        
-    uint16_t checksum;    
+    uint32_t checksum;    
     char data[DATA_SIZE]; 
 } packet_t;
 
-uint16_t checksum(const char *data, size_t len) {
-    uint32_t sum = 0;
-    for (size_t i = 0; i < len; i++) {
-        sum += (unsigned char)data[i];
+uint32_t crc32(const void *data, size_t n_bytes) {
+    uint32_t crc = 0xFFFFFFFF;
+    const uint8_t *bytes = (const uint8_t *)data;
+
+    for (size_t i = 0; i < n_bytes; i++) {
+        crc ^= bytes[i];
+        for (int j = 0; j < 8; j++)
+            crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
     }
-    return (uint16_t)(~sum);
+
+    return ~crc;
 }
 
 int main(int argc, char *argv[]) {
@@ -151,7 +157,6 @@ int main(int argc, char *argv[]) {
             snprintf(output_filename, sizeof(output_filename), "%s_recebido", filename);
         }
     
-        // Abre arquivo de saída
         FILE *output = fopen(output_filename, "wb");
         if (output == NULL) {
             perror("Erro ao criar arquivo de saída");
@@ -159,8 +164,42 @@ int main(int argc, char *argv[]) {
         }
     
         sendto(sockfd, buffer, strlen(buffer), 0, (const struct sockaddr *)&serv_addr, sizeof(serv_addr));
-    
-        // Começa a receber pacotes
+
+        char temp_buffer[sizeof(packet_t)];
+        int n = recvfrom(sockfd, temp_buffer, sizeof(temp_buffer) - 1, 0, (struct sockaddr *)&serv_addr, &len);
+        if (n < 0) {
+            perror("Erro ao receber resposta inicial");
+            fclose(output);
+            continue;
+        }
+
+        if (strncmp(temp_buffer, "ERROR", 5) == 0) {
+            printf("Servidor respondeu: %s\n", temp_buffer);
+            fclose(output);
+            remove(output_filename); 
+            continue;
+        }
+
+        packet_t first_packet;
+        memcpy(&first_packet, temp_buffer, sizeof(packet_t));
+
+        uint32_t calc_checksum = crc32(first_packet.data, first_packet.size);
+        if (first_packet.checksum != calc_checksum) {
+            printf("Checksum incorreto no pacote %u. Ignorando...\n", first_packet.seq_num);
+            fclose(output);
+            remove(output_filename);
+            continue;
+        }
+
+        fwrite(first_packet.data, 1, first_packet.size, output);
+
+        if (first_packet.size < DATA_SIZE) {
+            printf("Fim do arquivo alcançado.\n");
+            fclose(output);
+            printf("Arquivo salvo como '%s'.\n", output_filename);
+            continue;
+        }
+        
         while (1) {
             packet_t packet;
             int n = recvfrom(sockfd, &packet, sizeof(packet), 0, (struct sockaddr *)&serv_addr, &len);
@@ -168,8 +207,15 @@ int main(int argc, char *argv[]) {
                 perror("Erro ao receber pacote");
                 break;
             }
+
+            if (n != sizeof(packet_t)) {
+                printf("Pacote recebido incompleto (%d bytes). Ignorando...\n", n);
+                fclose(output);
+                remove(output_filename);
+                continue;
+            }
     
-            uint16_t calc_checksum = checksum(packet.data, packet.size);
+            uint16_t calc_checksum = crc32(packet.data, packet.size);
             if (packet.checksum != calc_checksum) {
                 printf("Checksum incorreto no pacote %u. Ignorando...\n", packet.seq_num);
                 continue;

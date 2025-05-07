@@ -20,6 +20,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -27,15 +28,15 @@
 #include <netinet/in.h>
 
 #define PORT 5555
-#define WINDOW_SIZE 5
+#define WINDOW_SIZE 1
 #define BUFFER_SIZE 1024
-#define HEADER_SIZE (sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint16_t))
+#define HEADER_SIZE (sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint32_t))
 #define DATA_SIZE (BUFFER_SIZE - HEADER_SIZE)
 
 typedef struct {
     uint32_t seq_num;     
     uint16_t size;        
-    uint16_t checksum;    
+    uint32_t checksum;    
     char data[DATA_SIZE]; 
 } packet_t;
 
@@ -64,12 +65,17 @@ void print_local_ip() {
     freeifaddrs(ifaddr);
 }
 
-uint16_t checksum(const char *data, size_t len) {
-    uint32_t sum = 0;
-    for (size_t i = 0; i < len; i++) {
-        sum += (unsigned char)data[i];
+uint32_t crc32(const void *data, size_t n_bytes) {
+    uint32_t crc = 0xFFFFFFFF;
+    const uint8_t *bytes = (const uint8_t *)data;
+
+    for (size_t i = 0; i < n_bytes; i++) {
+        crc ^= bytes[i];
+        for (int j = 0; j < 8; j++)
+            crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
     }
-    return (uint16_t)(~sum);
+
+    return ~crc;
 }
 
 int main() {
@@ -156,7 +162,7 @@ int main() {
             
                     p->seq_num = next_seq;
                     p->size = bytes_read;
-                    p->checksum = checksum(p->data, bytes_read);
+                    p->checksum = crc32(p->data, bytes_read);
                     sendto(sockfd, p, sizeof(packet_t), 0, (const struct sockaddr *)&cli_addr, len);
                     next_seq++;
                 }

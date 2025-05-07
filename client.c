@@ -104,20 +104,30 @@ int main(int argc, char *argv[]) {
 
     
     while (1) {
-    printf("Digite uma requisição (ou 'sair' para encerrar): ");
-    fgets(buffer, sizeof(buffer), stdin);
+        printf("Digite uma requisição (ou 'FIN' para encerrar): ");
+        fgets(buffer, sizeof(buffer), stdin);
 
-    
-    buffer[strcspn(buffer, "\n")] = 0;
+        
+        buffer[strcspn(buffer, "\n")] = 0;
 
-    if (strcmp(buffer, "sair") == 0) break;
+        if (strcmp(buffer, "FIN") == 0) {
+            sendto(sockfd, "FIN", strlen("FIN"), 0, (const struct sockaddr *)&serv_addr, len);
+            printf("Conexão encerrada pelo cliente.\n");
+            break;
+        }
 
-    sendto(sockfd, buffer, strlen(buffer), 0,
-           (const struct sockaddr *)&serv_addr, sizeof(serv_addr));
+        sendto(sockfd, buffer, strlen(buffer), 0,(const struct sockaddr *)&serv_addr, sizeof(serv_addr));
+        int n = recvfrom(sockfd, buffer, BUFFER_SIZE - 1, 0, (struct sockaddr *)&serv_addr, &len);
+                
+        if (n < 0) {
+            perror("Erro ao receber dados");
+            continue;
+        }
+        
+        buffer[n] = '\0'; 
 
-    printf("Mensagem enviada: %s\n", buffer);
-    }
-
+        printf("%s\n", buffer);
+    }    
     close(sockfd);
     return 0;
 }

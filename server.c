@@ -26,8 +26,16 @@
 #include <ifaddrs.h>
 #include <netinet/in.h>
 
-#define PORT 12345
+#define PORT 5555
 #define BUFFER_SIZE 1024
+#define HEADER_SIZE (sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint16_t))
+
+typedef struct {
+    uint32_t seq_num;     
+    uint16_t size;        
+    uint16_t checksum;    
+    char data[BUFFER_SIZE - HEADER_SIZE]; 
+} packet_t;
 
 void print_local_ip() {
     struct ifaddrs *ifaddr, *ifa;
@@ -52,17 +60,6 @@ void print_local_ip() {
     }
 
     freeifaddrs(ifaddr);
-}
-
-int handshake(char buffer[], int connection_status) {
-    if (strcmp(buffer, "SYN") == 0) {
-        printf("Cliente requisitou conexão\n");
-        return 1;   
-    } else if (strcmp(buffer, "ACK") == 0) {
-        printf("Cliente confirmou conexão\n");
-        return 2;
-    }
-    return 0;
 }
 
 int main() {
@@ -97,23 +94,58 @@ int main() {
             perror("Erro ao receber dados");
             continue;
         }
-        buffer[n] = '\0'; 
-
+    
+        buffer[n] = '\0';
+    
         // Realização do handshake
         while(connection_status < 2){
-            connection_status = handshake(buffer, connection_status);
+            if (strcmp(buffer, "SYN") == 0) {
+                printf("Cliente requisitou conexão\n");
+                connection_status = 1;   
+            } else if (strcmp(buffer, "ACK") == 0) {
+                printf("Cliente confirmou conexão\n");
+                connection_status = 2;
+            }
             if (connection_status == 1) {
                 sendto(sockfd, "SYN-ACK", strlen("SYN-ACK"), 0, (const struct sockaddr *)&cli_addr, len);
             }
 
-            int n = recvfrom(sockfd, buffer, BUFFER_SIZE - 1, 0,
-                (struct sockaddr *)&cli_addr, &len);
+            int n = recvfrom(sockfd, buffer, BUFFER_SIZE - 1, 0, (struct sockaddr *)&cli_addr, &len);
+            
             if (n < 0) {
-            perror("Erro ao receber dados");
-            continue;
+                perror("Erro ao receber dados");
+                continue;
             }
+            
             buffer[n] = '\0'; 
         }
+
+        // Processamento da mensagem recebida
+        printf("Mensagem recebida: %s\n", buffer);
+        if (strncmp(buffer, "GET", 3) == 0) {
+            char *filename = buffer + 4;
+            FILE *file = fopen(filename, "rb");
+            if (file == NULL) {
+                perror("Erro ao abrir arquivo");
+                sendto(sockfd, "ERROR: Arquivo não encontrado", strlen("ERROR: Arquivo não encontrado"), 0, (const struct sockaddr *)&cli_addr, len);
+                continue;
+            }
+
+            // Envio do arquivo em pacotes de 1024 bytes
+            size_t bytes_read;
+            while ((bytes_read = fread(buffer, 1, BUFFER_SIZE, file)) > 0) {
+            sendto(sockfd, buffer, BUFFER_SIZE - 1, 0, (const struct sockaddr *)&cli_addr, len);
+            }
+            fclose(file);
+        } else if (strncmp(buffer, "FIN", 3) == 0) {
+            printf("Cliente desconectou\n");
+            sendto(sockfd, "ACK", strlen("ACK"), 0, (const struct sockaddr *)&cli_addr, len);
+            connection_status = 0; 
+        } else {
+            printf("Comando desconhecido\n");
+        }
+        // Envio de confirmação de recebimento
+
 
 
     }

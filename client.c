@@ -23,10 +23,13 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sys/select.h>
+#include <time.h>
+#include <stdbool.h>
 
 #define BUFFER_SIZE 1024
 #define HEADER_SIZE (sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint32_t))
 #define DATA_SIZE (BUFFER_SIZE - HEADER_SIZE)
+#define LOSS_PROBABILITY 0.1
 
 typedef struct {
     uint32_t seq_num;     
@@ -34,6 +37,10 @@ typedef struct {
     uint32_t checksum;    
     char data[DATA_SIZE]; 
 } packet_t;
+
+bool should_drop_packet() {
+    return ((float)rand() / RAND_MAX) < LOSS_PROBABILITY;
+}
 
 uint32_t crc32(const void *data, size_t n_bytes) {
     uint32_t crc = 0xFFFFFFFF;
@@ -55,6 +62,7 @@ int main(int argc, char *argv[]) {
     }
 
     int connection_status = 0;
+    srand(time(NULL));
 
     // ============Configuração do servidor==================
     const char *server_ip = argv[1];
@@ -163,22 +171,48 @@ int main(int argc, char *argv[]) {
         // ================Implementação do protocolo Go-Back-N==================
         while (1) {
             packet_t packet;
+            fd_set read_fds;
+            FD_ZERO(&read_fds);
+            FD_SET(sockfd, &read_fds);
+
+            struct timeval timeout;
+            timeout.tv_sec = 3;  
+            timeout.tv_usec = 0;
+
+            int activity = select(sockfd + 1, &read_fds, NULL, NULL, &timeout);
+            if (activity == 0) {
+                printf("Erro: timeout esperando pacote do servidor. Conexão pode ter sido perdida.\n");
+            
+                if (output) {
+                    fclose(output);
+                    output = NULL;
+                }
+            
+                remove(output_filename);
+                close(sockfd);  
+                exit(EXIT_FAILURE);  
+            }
+
             int n = recvfrom(sockfd, &packet, sizeof(packet), 0, (struct sockaddr *)&serv_addr, &len);
             if (n < 0) {
                 perror("Erro ao receber pacote");
                 break;
             }
     
-            if (n != sizeof(packet_t)) {
-                printf("Pacote recebido incompleto (%d bytes). Ignorando...\n", n);
-                continue;
-            }
-    
             if (strncmp((char *)&packet, "ERROR", 5) == 0) {
-                printf("Servidor respondeu: %s\n", (char *)&packet);
-                fclose(output);
+                printf("%s\n", (char *)&packet);
+                if (output) {
+                    fclose(output);
+                    output = NULL;
+                }
+            
                 remove(output_filename);
                 break;
+            }
+
+            if (should_drop_packet() && packet.seq_num != 0) {
+                printf("Simulação: pacote %u perdido (dropado artificialmente)\n", packet.seq_num);
+                continue;  
             }
     
             uint32_t calc_checksum = crc32(packet.data, packet.size);
@@ -190,26 +224,28 @@ int main(int argc, char *argv[]) {
             if (packet.seq_num == expected_seq) {
                 fwrite(packet.data, 1, packet.size, output);
     
-                // Envia ACK
+                
                 sendto(sockfd, &expected_seq, sizeof(expected_seq), 0, (struct sockaddr *)&serv_addr, len);
                 expected_seq++;
     
                 if (packet.size < DATA_SIZE) {
                     printf("Fim do arquivo alcançado.\n");
+                    printf("Arquivo salvo como '%s'.\n", output_filename);
                     break;
                 }
             } else {
-                // Envia ACK do último recebido corretamente (Go-Back-N)
+                printf("Esperava pacote %u, mas recebi %u. Solicitando retransmissão...\n", expected_seq, packet.seq_num);
                 uint32_t ack = (expected_seq > 0) ? expected_seq - 1 : 0;
                 sendto(sockfd, &ack, sizeof(ack), 0, (struct sockaddr *)&serv_addr, len);
             }
         }
     
-        fclose(output);
-        printf("Arquivo salvo como '%s'.\n", output_filename);
+        if (output) {
+            fclose(output);
+            output = NULL;
+        }
     }
     
-
     close(sockfd);
     return 0;
 }

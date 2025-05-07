@@ -28,7 +28,7 @@
 #include <netinet/in.h>
 
 #define PORT 5555
-#define WINDOW_SIZE 1
+#define WINDOW_SIZE 5
 #define BUFFER_SIZE 1024
 #define HEADER_SIZE (sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint32_t))
 #define DATA_SIZE (BUFFER_SIZE - HEADER_SIZE)

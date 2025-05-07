@@ -7,7 +7,7 @@
 
 /* 
  * Criação de um cliente UDP simples que envia mensagens para um servidor UDP e recebe respostas.
- * O cliente deve ser capaz de enviar mensagens de controle, como "sair" ou "desconectar", e encerrar a conexão com o servidor.
+ * O cliente deve ser capaz de enviar mensagens de controle, como "FIN" ou "GET", e encerrar a conexão com o servidor.
  * O cliente deve ser capaz de simular perda de pacotes, informando qual pacote foi perdido
  * O cliente deve ser capaz de receber os segmentos recebidos corretamente e verificar a integridade (checksum) dos dados recebidos.
  * Após receber todos os segmentos (ou um sinal de fim), verificar se o arquivo foi recebido corretamente e, se sim, salvar o arquivo, podendo abrir o arquivo recebido.
@@ -24,6 +24,23 @@
 #include <sys/select.h>
 
 #define BUFFER_SIZE 1024
+#define HEADER_SIZE (sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint16_t))
+#define DATA_SIZE (BUFFER_SIZE - HEADER_SIZE)
+
+typedef struct {
+    uint32_t seq_num;     
+    uint16_t size;        
+    uint16_t checksum;    
+    char data[DATA_SIZE]; 
+} packet_t;
+
+uint16_t checksum(const char *data, size_t len) {
+    uint32_t sum = 0;
+    for (size_t i = 0; i < len; i++) {
+        sum += (unsigned char)data[i];
+    }
+    return (uint16_t)(~sum);
+}
 
 int main(int argc, char *argv[]) {
     if (argc != 3) {
@@ -33,7 +50,7 @@ int main(int argc, char *argv[]) {
 
     int connection_status = 0;
 
-    // Configuração do servidor
+    // ============Configuração do servidor==================
     const char *server_ip = argv[1];
     int PORT = atoi(argv[2]);
 
@@ -52,10 +69,9 @@ int main(int argc, char *argv[]) {
     serv_addr.sin_port = htons(PORT);
     serv_addr.sin_addr.s_addr = inet_addr(server_ip);
 
-    // Handshake em 3 vias
+    // ==============Handshake em 3 vias==================
     while (connection_status == 0) {
         
-        //Timer para tentativa de conexão
         int tentativas = 0;
         int max_tentativas = 3;
         int timeout_segundos = 2;
@@ -63,7 +79,6 @@ int main(int argc, char *argv[]) {
         while (tentativas < max_tentativas) {
             sendto(sockfd, "SYN", strlen("SYN"), 0, (const struct sockaddr *)&serv_addr, len);
 
-            // Timeout usando select()
             fd_set fds;
             FD_ZERO(&fds);
             FD_SET(sockfd, &fds);
@@ -103,31 +118,75 @@ int main(int argc, char *argv[]) {
     }
 
     
+    FILE *output = fopen("poema_recebido.txt", "wb");
+    if (output == NULL) {
+        perror("Erro ao criar arquivo de saída");
+        exit(EXIT_FAILURE);
+    }
+
     while (1) {
-        printf("Digite uma requisição (ou 'FIN' para encerrar): ");
+        printf("Digite uma requisição GET filename.ext (ou 'FIN' para encerrar): ");
         fgets(buffer, sizeof(buffer), stdin);
-
-        
         buffer[strcspn(buffer, "\n")] = 0;
-
+    
         if (strcmp(buffer, "FIN") == 0) {
             sendto(sockfd, "FIN", strlen("FIN"), 0, (const struct sockaddr *)&serv_addr, len);
             printf("Conexão encerrada pelo cliente.\n");
             break;
         }
-
-        sendto(sockfd, buffer, strlen(buffer), 0,(const struct sockaddr *)&serv_addr, sizeof(serv_addr));
-        int n = recvfrom(sockfd, buffer, BUFFER_SIZE - 1, 0, (struct sockaddr *)&serv_addr, &len);
-                
-        if (n < 0) {
-            perror("Erro ao receber dados");
+    
+        if (strncmp(buffer, "GET ", 4) != 0) {
+            printf("Formato inválido. Use: GET filename.ext\n");
             continue;
         }
-        
-        buffer[n] = '\0'; 
+    
+        char *filename = buffer + 4;
+    
+        char output_filename[256];
+        char *dot = strrchr(filename, '.');
+        if (dot) {
+            size_t name_len = dot - filename;
+            snprintf(output_filename, sizeof(output_filename), "%.*s_recebido%s", (int)name_len, filename, dot);
+        } else {
+            snprintf(output_filename, sizeof(output_filename), "%s_recebido", filename);
+        }
+    
+        // Abre arquivo de saída
+        FILE *output = fopen(output_filename, "wb");
+        if (output == NULL) {
+            perror("Erro ao criar arquivo de saída");
+            continue;
+        }
+    
+        sendto(sockfd, buffer, strlen(buffer), 0, (const struct sockaddr *)&serv_addr, sizeof(serv_addr));
+    
+        // Começa a receber pacotes
+        while (1) {
+            packet_t packet;
+            int n = recvfrom(sockfd, &packet, sizeof(packet), 0, (struct sockaddr *)&serv_addr, &len);
+            if (n < 0) {
+                perror("Erro ao receber pacote");
+                break;
+            }
+    
+            uint16_t calc_checksum = checksum(packet.data, packet.size);
+            if (packet.checksum != calc_checksum) {
+                printf("Checksum incorreto no pacote %u. Ignorando...\n", packet.seq_num);
+                continue;
+            }
+    
+            fwrite(packet.data, 1, packet.size, output);
+    
+            if (packet.size < DATA_SIZE) {
+                printf("Fim do arquivo alcançado.\n");
+                break;
+            }
+        }
+    
+        fclose(output);
+        printf("Arquivo salvo como '%s'.\n", output_filename);
+    }
 
-        printf("%s\n", buffer);
-    }    
     close(sockfd);
     return 0;
 }

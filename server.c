@@ -27,14 +27,16 @@
 #include <netinet/in.h>
 
 #define PORT 5555
+#define WINDOW_SIZE 5
 #define BUFFER_SIZE 1024
 #define HEADER_SIZE (sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint16_t))
+#define DATA_SIZE (BUFFER_SIZE - HEADER_SIZE)
 
 typedef struct {
     uint32_t seq_num;     
     uint16_t size;        
     uint16_t checksum;    
-    char data[BUFFER_SIZE - HEADER_SIZE]; 
+    char data[DATA_SIZE]; 
 } packet_t;
 
 void print_local_ip() {
@@ -60,6 +62,14 @@ void print_local_ip() {
     }
 
     freeifaddrs(ifaddr);
+}
+
+uint16_t checksum(const char *data, size_t len) {
+    uint32_t sum = 0;
+    for (size_t i = 0; i < len; i++) {
+        sum += (unsigned char)data[i];
+    }
+    return (uint16_t)(~sum);
 }
 
 int main() {
@@ -97,7 +107,7 @@ int main() {
     
         buffer[n] = '\0';
     
-        // Realização do handshake
+        //============ Realização do handshake==================
         while(connection_status < 2){
             if (strcmp(buffer, "SYN") == 0) {
                 printf("Cliente requisitou conexão\n");
@@ -120,7 +130,7 @@ int main() {
             buffer[n] = '\0'; 
         }
 
-        // Processamento da mensagem recebida
+        // =============Processamento da mensagem recebida==================
         printf("Mensagem recebida: %s\n", buffer);
         if (strncmp(buffer, "GET", 3) == 0) {
             char *filename = buffer + 4;
@@ -131,12 +141,29 @@ int main() {
                 continue;
             }
 
-            // Envio do arquivo em pacotes de 1024 bytes
-            size_t bytes_read;
-            while ((bytes_read = fread(buffer, 1, BUFFER_SIZE, file)) > 0) {
-            sendto(sockfd, buffer, BUFFER_SIZE - 1, 0, (const struct sockaddr *)&cli_addr, len);
+            // ===============Go-back-N ARQ==================
+            packet_t window[WINDOW_SIZE]; 
+            uint32_t base = 0;
+            uint32_t next_seq = 0;
+            
+            while (1) {
+                if (next_seq < base + WINDOW_SIZE) {
+                    packet_t *p = &window[next_seq % WINDOW_SIZE];
+                    size_t bytes_read = fread(p->data, 1, sizeof(p->data), file);
+                    if (bytes_read == 0) {
+                        break;
+                    }
+            
+                    p->seq_num = next_seq;
+                    p->size = bytes_read;
+                    p->checksum = checksum(p->data, bytes_read);
+                    sendto(sockfd, p, sizeof(packet_t), 0, (const struct sockaddr *)&cli_addr, len);
+                    next_seq++;
+                }
+            
+                // Recebe ACKs aqui e atualiza base, trata timeouts etc.
             }
-            fclose(file);
+
         } else if (strncmp(buffer, "FIN", 3) == 0) {
             printf("Cliente desconectou\n");
             sendto(sockfd, "ACK", strlen("ACK"), 0, (const struct sockaddr *)&cli_addr, len);

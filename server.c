@@ -32,6 +32,8 @@
 #define BUFFER_SIZE 1024
 #define HEADER_SIZE (sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint32_t))
 #define DATA_SIZE (BUFFER_SIZE - HEADER_SIZE)
+#define TIMEOUT_SEC 1
+#define TIMEOUT_USEC 0
 
 typedef struct {
     uint32_t seq_num;     
@@ -152,24 +154,60 @@ int main() {
             uint32_t base = 0;
             uint32_t next_seq = 0;
             
+            fd_set read_fds;
+            struct timeval timeout;
+
             while (1) {
                 if (next_seq < base + WINDOW_SIZE) {
                     packet_t *p = &window[next_seq % WINDOW_SIZE];
                     size_t bytes_read = fread(p->data, 1, sizeof(p->data), file);
+
                     if (bytes_read == 0) {
                         break;
                     }
-            
+
                     p->seq_num = next_seq;
                     p->size = bytes_read;
                     p->checksum = crc32(p->data, bytes_read);
+
                     sendto(sockfd, p, sizeof(packet_t), 0, (const struct sockaddr *)&cli_addr, len);
+                    printf("Enviado pacote %u\n", next_seq);
+
                     next_seq++;
                 }
-            
-                // Recebe ACKs aqui e atualiza base, trata timeouts etc.
+
+                
+                FD_ZERO(&read_fds);
+                FD_SET(sockfd, &read_fds);
+                timeout.tv_sec = TIMEOUT_SEC;
+                timeout.tv_usec = TIMEOUT_USEC;
+
+                int activity = select(sockfd + 1, &read_fds, NULL, NULL, &timeout);
+
+                if (activity < 0) {
+                    perror("Erro no select");
+                    break;
+                } else if (activity == 0) {
+                    printf("Timeout! Reenviando pacote %u\n", base);
+                    packet_t *p = &window[base % WINDOW_SIZE];
+                    sendto(sockfd, p, sizeof(packet_t), 0, (const struct sockaddr *)&cli_addr, len);
+                } else {
+                    uint32_t ack;
+                    recvfrom(sockfd, &ack, sizeof(ack), 0, (struct sockaddr *)&cli_addr, &len);
+                    printf("ACK recebido: %u\n", ack);
+
+                    if (ack == base) {
+                        base++;
+                    }
+                }
+
+                if (feof(file) && base == next_seq) {
+                    printf("Todos os pacotes enviados e reconhecidos.\n");
+                    break;
+                }
             }
 
+        // =============Desconexão==================
         } else if (strncmp(buffer, "FIN", 3) == 0) {
             printf("Cliente desconectou\n");
             sendto(sockfd, "ACK", strlen("ACK"), 0, (const struct sockaddr *)&cli_addr, len);
@@ -177,10 +215,6 @@ int main() {
         } else {
             printf("Comando desconhecido\n");
         }
-        // Envio de confirmação de recebimento
-
-
-
     }
 
     close(sockfd);

@@ -153,27 +153,29 @@ int main() {
             packet_t window[WINDOW_SIZE]; 
             uint32_t base = 0;
             uint32_t next_seq = 0;
-            
+            int eof_reached = 0;
+
             fd_set read_fds;
             struct timeval timeout;
 
             while (1) {
-                if (next_seq < base + WINDOW_SIZE) {
+                
+                if (!eof_reached && next_seq < base + WINDOW_SIZE) {
                     packet_t *p = &window[next_seq % WINDOW_SIZE];
                     size_t bytes_read = fread(p->data, 1, sizeof(p->data), file);
 
                     if (bytes_read == 0) {
-                        break;
+                        eof_reached = 1;
+                    } else {
+                        p->seq_num = next_seq;
+                        p->size = bytes_read;
+                        p->checksum = crc32(p->data, bytes_read);
+
+                        sendto(sockfd, p, sizeof(packet_t), 0, (const struct sockaddr *)&cli_addr, len);
+                        printf("Enviado pacote %u (%zu bytes)\n", next_seq, bytes_read);
+
+                        next_seq++;
                     }
-
-                    p->seq_num = next_seq;
-                    p->size = bytes_read;
-                    p->checksum = crc32(p->data, bytes_read);
-
-                    sendto(sockfd, p, sizeof(packet_t), 0, (const struct sockaddr *)&cli_addr, len);
-                    printf("Enviado pacote %u\n", next_seq);
-
-                    next_seq++;
                 }
 
                 
@@ -188,21 +190,31 @@ int main() {
                     perror("Erro no select");
                     break;
                 } else if (activity == 0) {
-                    printf("Timeout! Reenviando pacote %u\n", base);
-                    packet_t *p = &window[base % WINDOW_SIZE];
-                    sendto(sockfd, p, sizeof(packet_t), 0, (const struct sockaddr *)&cli_addr, len);
+                    // Timeout: reenvia todos os pacotes da janela
+                    printf("Timeout! Reenviando janela a partir do pacote %u\n", base);
+                    for (uint32_t i = base; i < next_seq; ++i) {
+                        packet_t *p = &window[i % WINDOW_SIZE];
+                        sendto(sockfd, p, sizeof(packet_t), 0, (const struct sockaddr *)&cli_addr, len);
+                        printf("Reenviado pacote %u\n", p->seq_num);
+                    }
                 } else {
                     uint32_t ack;
-                    recvfrom(sockfd, &ack, sizeof(ack), 0, (struct sockaddr *)&cli_addr, &len);
+                    ssize_t ack_bytes = recvfrom(sockfd, &ack, sizeof(ack), 0, (struct sockaddr *)&cli_addr, &len);
+                    if (ack_bytes < 0) {
+                        perror("Erro ao receber ACK");
+                        continue;
+                    }
+
                     printf("ACK recebido: %u\n", ack);
 
-                    if (ack == base) {
-                        base++;
+                    if (ack >= base) {
+                        base = ack + 1;
                     }
                 }
 
-                if (feof(file) && base == next_seq) {
-                    printf("Todos os pacotes enviados e reconhecidos.\n");
+                // Condição de parada: EOF + todos os pacotes reconhecidos
+                if (eof_reached && base == next_seq) {
+                    printf("Todos os pacotes enviados e reconhecidos. Fim da transmissão.\n");
                     break;
                 }
             }

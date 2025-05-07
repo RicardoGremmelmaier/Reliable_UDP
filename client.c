@@ -123,13 +123,6 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    
-    FILE *output = fopen("poema_recebido.txt", "wb");
-    if (output == NULL) {
-        perror("Erro ao criar arquivo de saída");
-        exit(EXIT_FAILURE);
-    }
-
     while (1) {
         printf("Digite uma requisição GET filename.ext (ou 'FIN' para encerrar): ");
         fgets(buffer, sizeof(buffer), stdin);
@@ -164,42 +157,10 @@ int main(int argc, char *argv[]) {
         }
     
         sendto(sockfd, buffer, strlen(buffer), 0, (const struct sockaddr *)&serv_addr, sizeof(serv_addr));
-
-        char temp_buffer[sizeof(packet_t)];
-        int n = recvfrom(sockfd, temp_buffer, sizeof(temp_buffer) - 1, 0, (struct sockaddr *)&serv_addr, &len);
-        if (n < 0) {
-            perror("Erro ao receber resposta inicial");
-            fclose(output);
-            continue;
-        }
-
-        if (strncmp(temp_buffer, "ERROR", 5) == 0) {
-            printf("Servidor respondeu: %s\n", temp_buffer);
-            fclose(output);
-            remove(output_filename); 
-            continue;
-        }
-
-        packet_t first_packet;
-        memcpy(&first_packet, temp_buffer, sizeof(packet_t));
-
-        uint32_t calc_checksum = crc32(first_packet.data, first_packet.size);
-        if (first_packet.checksum != calc_checksum) {
-            printf("Checksum incorreto no pacote %u. Ignorando...\n", first_packet.seq_num);
-            fclose(output);
-            remove(output_filename);
-            continue;
-        }
-
-        fwrite(first_packet.data, 1, first_packet.size, output);
-
-        if (first_packet.size < DATA_SIZE) {
-            printf("Fim do arquivo alcançado.\n");
-            fclose(output);
-            printf("Arquivo salvo como '%s'.\n", output_filename);
-            continue;
-        }
-        
+    
+        uint32_t expected_seq = 0;
+    
+        // ================Implementação do protocolo Go-Back-N==================
         while (1) {
             packet_t packet;
             int n = recvfrom(sockfd, &packet, sizeof(packet), 0, (struct sockaddr *)&serv_addr, &len);
@@ -207,31 +168,47 @@ int main(int argc, char *argv[]) {
                 perror("Erro ao receber pacote");
                 break;
             }
-
+    
             if (n != sizeof(packet_t)) {
                 printf("Pacote recebido incompleto (%d bytes). Ignorando...\n", n);
-                fclose(output);
-                remove(output_filename);
                 continue;
             }
     
-            uint16_t calc_checksum = crc32(packet.data, packet.size);
+            if (strncmp((char *)&packet, "ERROR", 5) == 0) {
+                printf("Servidor respondeu: %s\n", (char *)&packet);
+                fclose(output);
+                remove(output_filename);
+                break;
+            }
+    
+            uint32_t calc_checksum = crc32(packet.data, packet.size);
             if (packet.checksum != calc_checksum) {
                 printf("Checksum incorreto no pacote %u. Ignorando...\n", packet.seq_num);
                 continue;
             }
     
-            fwrite(packet.data, 1, packet.size, output);
+            if (packet.seq_num == expected_seq) {
+                fwrite(packet.data, 1, packet.size, output);
     
-            if (packet.size < DATA_SIZE) {
-                printf("Fim do arquivo alcançado.\n");
-                break;
+                // Envia ACK
+                sendto(sockfd, &expected_seq, sizeof(expected_seq), 0, (struct sockaddr *)&serv_addr, len);
+                expected_seq++;
+    
+                if (packet.size < DATA_SIZE) {
+                    printf("Fim do arquivo alcançado.\n");
+                    break;
+                }
+            } else {
+                // Envia ACK do último recebido corretamente (Go-Back-N)
+                uint32_t ack = (expected_seq > 0) ? expected_seq - 1 : 0;
+                sendto(sockfd, &ack, sizeof(ack), 0, (struct sockaddr *)&serv_addr, len);
             }
         }
     
         fclose(output);
         printf("Arquivo salvo como '%s'.\n", output_filename);
     }
+    
 
     close(sockfd);
     return 0;
